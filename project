@@ -1,0 +1,552 @@
+/*
+ ===================================================================================
+ Name        : client.c
+ Author      : Elad&Yael
+ Description : manage clients with connection of TCP and UDP.
+			   recive TCP and multicast messages and send TCP messages to the server.
+ ===================================================================================
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <sys/stat.h>
+
+#define BUFF_SIZE 1024
+#define SERVER_IP "192.4.5.1"
+
+/*messages we send*/
+#define HELLO 0
+#define INFO 1
+#define ANSWER 2
+#define QUIT 3
+#define FIRSTQ 4
+
+/*messages we recive*/
+#define HELLOACK 0
+#define INFOACK 1
+#define QUESTION 2
+#define FIN 3
+#define INVALIDCOMMAND 4
+
+/*side function*/
+void shutdown_and_goodbye();
+void whoWin(int i);
+
+/*global variables*/
+uint8_t commandType,age;
+uint16_t reserved, server_port;
+uint32_t multicastGroup;
+int yes = 1 , my_cat = 0;
+struct in_addr temp;
+
+/*UDP Socket and TCP*/
+int udp_sock, client_socket_fd,  qFlag = 1, question_f = 5;
+int ports[3]={6000,6001,6002};
+struct sockaddr_in serv_addr;
+
+int main(int argc, char *argv[]) {
+
+    //declaring variables
+    int port_no, num_parts, byte_no, retVal;
+    int flag_c = 1 , currunt_q = 1 ;
+    struct ip_mreq mreq;
+    int len , maxfdp1;
+    char *str;
+    char quesionbuff[BUFF_SIZE + 1];
+    int askFlag = 0, permitFlag = 0, newFlag = 0 ,catagory_no = 0;
+    char buffer[BUFF_SIZE + 1], inbox[BUFF_SIZE + 1], input[10], *songAnnounced, *replyString, recName[201], answer[4];
+    buffer[BUFF_SIZE] = '\0';
+    char nickname[10];
+    int sizeofnickname, lenth;
+    char buff[3];
+    uint8_t replyStringSize;
+    fd_set fds , fdu;
+    struct sockaddr_in server_addr;
+    struct stat st;
+    memset(buffer, '\0', BUFF_SIZE);
+
+    //struct for Timeout
+    struct timeval timeout;
+
+    // read command line arguments
+    if (argc != 2) {
+        perror("Num of Arguments is Incorrect\n");
+        exit(EXIT_FAILURE);
+    }
+    //convert the port argv
+    port_no = atoi(argv[1]);
+	if (port_no != 12345)
+	{
+		printf("please use port number 12345\n\n");
+	}
+
+    //setup the TCP socket
+    if((client_socket_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("ERROR openning socket");
+        exit(EXIT_FAILURE);
+    }
+
+    //clear our the struct server_addr
+    memset((char *) &server_addr, 0, sizeof(server_addr));
+
+    // set up the TCP socket 1
+    server_addr.sin_family = AF_INET; //IPv4
+    server_addr.sin_port = htons(port_no);   //host to network byte order
+    server_addr.sin_addr.s_addr = inet_addr(SERVER_IP); //turn char to int as needed in the struct
+    memset(server_addr.sin_zero, '\0', sizeof(server_addr.sin_zero));
+
+    // trying to connect to the server (TCP socket)
+    if (connect(client_socket_fd,(struct sockaddr *) &server_addr,sizeof(server_addr)) < 0) {
+        perror("ERROR connecting");
+        exit(EXIT_FAILURE);
+    }
+    //send HELLO
+    byte_no = 0;
+    reserved = 0;
+    memset(buff, '\0', 3);
+    buff[0] = HELLO;
+    buff[1] = htons(reserved);
+	// which catagory
+    printf("Choose Catagory :\n1.Sports\n2.Songs\n3.Math\n");
+    scanf("%d",&catagory_no);
+    if(catagory_no >3 || catagory_no<1)
+    {
+    	printf("Catagory number don't exist, Please connect again\n");
+    	shutdown_and_goodbye();
+    	exit(EXIT_FAILURE);
+    }
+    buff[2] = catagory_no;
+    byte_no = send(client_socket_fd,&buff,sizeof(buff),0);
+	//check send
+    if(byte_no != 3) {
+        printf("ERROR sending Hello\nClosing socket and communication\n");
+        if(close(client_socket_fd) < 0) {
+            perror("ERROR closing TCP socket\n");
+        }
+        exit(EXIT_FAILURE);
+    }
+
+    //set the timeout
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 300000;
+
+    //set for select TCP
+    FD_ZERO(&fds);
+    FD_SET(client_socket_fd, &fds);
+
+	//wait for massage
+    retVal = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+    if(retVal <= 0 && (errno != EINTR)) {
+        perror("Timeout - didn't received WELCOME\nClosing the communication\n");
+        if(close(client_socket_fd) < 0)
+            perror("ERROR closing TCP socket\n");
+        exit(EXIT_FAILURE);
+    }
+	//check read
+    if((byte_no = read(client_socket_fd, inbox, BUFF_SIZE)) <= 0) {
+        perror("Can not read from socket\nClosing socket and communication\n");
+        if(close(client_socket_fd) < 0)
+            perror("ERROR closing TCP socket\n");
+        exit(EXIT_FAILURE);
+    }
+	if(byte_no != 7) {
+    	perror("Wrong message format\nClosing socket and communication\n");
+        if(close(client_socket_fd) < 0){
+            perror("ERROR closing TCP socket\n");
+		}
+        exit(EXIT_FAILURE);
+    }
+    commandType = (uint8_t) inbox[0];
+    if(commandType != HELLOACK) {
+    	perror("Message type is not Welcome\nClosing socket and communication\n");
+        if(close(client_socket_fd) < 0){
+            perror("ERROR closing TCP socket\n");
+		}
+        exit(EXIT_FAILURE);
+    }
+	//clear buffer for send
+    memset(buffer, '\0', BUFF_SIZE);
+
+    //enter detail of registration - nickname and age
+    printf("Please enter your nickname (no longer then 10 letters):\n");
+    scanf("%s",nickname);
+    sizeofnickname = sizeof(nickname);
+    if(sizeofnickname>10)
+    {
+    	printf("Nickname too long, please try again (no longer then 10 letters):\n");
+    	scanf("%s",nickname);
+    	sizeofnickname = sizeof(nickname);
+    	if(sizeofnickname>10)
+    	{
+    		perror("Invalid Nickname\n");
+    		shutdown_and_goodbye();
+    		exit(EXIT_FAILURE);
+    	}
+    }
+    printf("Please Enter your age (0-99):\n");
+    scanf("%d",&age);
+    if(age<0 || age>99)
+    {
+    	printf("Invalid Age, Enter your age (0-99):\n");
+    	scanf("%d",&age);
+    	if(age<0 || age>99)
+    	{
+    		perror("Invalid Age\n");
+    		shutdown_and_goodbye();
+    		exit(EXIT_FAILURE);
+    	}
+    }
+	//fill buffer for send
+	buffer[0] = INFO;
+    buffer[1] = catagory_no;
+    buffer[2] = age;
+    buffer[3] = sizeofnickname;
+    memcpy(buffer+4,nickname,sizeofnickname);
+	//check send
+    if((num_parts = send(client_socket_fd, &buffer, 4+sizeofnickname, 0)) != 4+sizeofnickname) {
+        perror("ERROR in sending INFO\n");
+        shutdown_and_goodbye();
+        exit(EXIT_FAILURE);
+    }
+    memset(buffer, '\0', BUFF_SIZE);
+
+    //set UDP connection details
+    multicastGroup = htonl(*(((uint32_t*) (&(inbox)[1]))));
+    server_port = htons(*(((uint16_t*) (&(inbox)[5]))));
+    temp.s_addr = multicastGroup;
+
+    // start game
+    printf("\n********************************\n* Welcome to intTrivia Game!!! *\n********************************\n\n");
+    printf("The number of question are: 5\nMulticastGroup is: %s\nServerPort is: %u\n",inet_ntoa(temp),server_port);
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = server_port;
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	//open UDP socket
+	udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (udp_sock < 0) {
+		printf("ERROR in opening udp socket\n");
+		qFlag = 0;
+		shutdown_and_goodbye();
+		exit(EXIT_FAILURE);
+	}
+	//set fd of UDP
+	FD_SET(udp_sock,&fds);
+	u_int yes = 1;
+	if (setsockopt(udp_sock, SOL_SOCKET, SO_REUSEADDR, (char*) &yes, sizeof(yes)) < 0)
+	{
+	  perror("Reusing ADDR failed");
+	  return 1;
+	}
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	//set UDP details
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_ANY); // differs from sender
+	addr.sin_port = htons(ports[catagory_no-1]);
+
+	if (bind(udp_sock, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
+	perror("UDP bind failed\n");
+	qFlag = 0;
+	shutdown_and_goodbye();
+	exit(EXIT_FAILURE);
+	}
+
+	//multicast configuration
+	mreq.imr_multiaddr.s_addr = multicastGroup;
+	mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+	if (setsockopt(udp_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) != 0) {
+		perror("ERROR on setsocketopt\n");
+		qFlag = 0;
+		shutdown_and_goodbye();
+		exit(EXIT_FAILURE);
+	}
+	FD_SET(udp_sock, &fds);
+
+    while(qFlag) {
+		//set fds
+		FD_ZERO(&fds);
+		FD_SET(client_socket_fd,&fds);
+		FD_SET(udp_sock, &fds);
+		FD_SET(fileno(stdin), &fds);
+
+        //wait for response - select()
+        if(newFlag) {
+            timeout.tv_sec = 2;
+            timeout.tv_usec = 0;
+        } else {
+            timeout.tv_sec = 15;
+            timeout.tv_usec = 0;
+        }
+        memset(buffer, '\0', BUFF_SIZE);
+        memset(quesionbuff, '\0', BUFF_SIZE);
+
+		//let the client that he can quit with 'q'
+       // printf("At any time you can type 'q' to quit.\n");
+
+        if(newFlag)
+            retVal = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+        else
+            retVal = select(FD_SETSIZE, &fds, NULL, NULL, NULL);
+        if(retVal <= 0 && (errno != EINTR)) {
+            if(newFlag) {
+                printf("Timeout - new connection\n");
+                shutdown_and_goodbye(); //closing thread & sockets
+            }
+            exit(EXIT_FAILURE);
+        }
+
+		//input from keyboard - stdin
+        if(FD_ISSET(fileno(stdin), &fds)) {
+            scanf("%10s",input);
+            switch (input[0])
+			{
+                case 'q':
+                    qFlag = 0;
+                    break;
+                default :
+                    printf("Please enter 'q' to quit\n");
+            }
+            memset(input, '\0', sizeof(input));
+        }
+		//fd from UDP
+        else if(FD_ISSET(udp_sock, &fds)){
+			//printf("arrive Multicast read!\n"); //remove
+			printf("*******************************************\n");
+			if((byte_no = read(udp_sock, quesionbuff, BUFF_SIZE)) < 0) {
+					perror("The server closed the connection!\n");
+					shutdown_and_goodbye();
+					exit(EXIT_FAILURE);
+				}
+			commandType = (uint8_t) quesionbuff[0];
+			switch(commandType)
+			{
+				//get question from sever, scanf the answer and send
+				case QUESTION:
+					//printf("arrive Question case!\n"); //remove
+					//there is question to ask , initilaize with 5
+					if (question_f > 0) {
+						timeout.tv_sec = 15;
+						timeout.tv_usec = 0;
+
+						FD_ZERO(&fds);
+						FD_SET(fileno(stdin), &fds);
+						question_f--;
+						len = quesionbuff[1];
+						str = (char *) malloc(len + 1);
+						memcpy(str, quesionbuff +2 , len + 1 );
+
+						//print the question
+						if(currunt_q == 6){currunt_q = 1;}
+						printf("\nQuestion number %d:\n%s\nYour answer:\n",currunt_q, str);
+						currunt_q++;
+						retVal = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+						if (retVal == 0)
+						{
+							printf("Timeout - gain 0 points\n\n");
+							buffer[0] = ANSWER;
+							buffer[1] = catagory_no;
+							answer[0]= 'ff';
+							answer[1]= 'ff';
+							answer[2]= 'ff';
+							answer[3]= 'ff';
+							buffer[2] = strlen(answer);
+							memcpy(buffer + 3, answer, strlen(answer));
+							if ((num_parts = send(client_socket_fd, &buffer, 3 + strlen(answer), 0)) != (3 + strlen(answer))) {
+								perror("ERROR in sending first ANSWER\n");
+								shutdown_and_goodbye();
+								exit(EXIT_FAILURE);
+							}
+							printf("*******************************************\n\n");
+							break;
+						}
+						//input from keyboard - stdin
+						if(FD_ISSET(fileno(stdin), &fds))
+						{
+							scanf("%s", answer);
+							buffer[0] = ANSWER;
+							buffer[1] = catagory_no;
+							buffer[2] = strlen(answer);
+							memcpy(buffer + 3, answer, strlen(answer));
+							if ((num_parts = send(client_socket_fd, &buffer, 3 + strlen(answer), 0)) != (3 + strlen(answer))) {
+								perror("ERROR in sending first ANSWER\n");
+								shutdown_and_goodbye();
+								exit(EXIT_FAILURE);
+							}
+							printf("\n*******************************************\n\n");
+						}
+					}else {
+						perror("Wrong message type - question have already asked\n");
+						shutdown_and_goodbye();
+						exit(EXIT_FAILURE);
+					}
+					break;
+					//recive FIN from server, details about who win
+				case FIN:
+					if (byte_no != 2) {
+						perror("Wrong message format\n");
+						shutdown_and_goodbye();
+						return 1;
+					}
+					FD_ZERO(&fds);
+					FD_SET(fileno(stdin), &fds);
+					printf("*******************************************\n");
+					printf("Game Over\n");
+					//clac winners with whoWin func
+					whoWin((uint8_t )quesionbuff[1]);
+					printf("*******************************************\n\n");
+					printf("Do you want to keep playing in this Category (Y/N)?\n");
+					char* yesno;
+					//if the client dont answer the question he will disconnect
+					retVal = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+					if (retVal == 0)
+					{
+						buffer[0] = QUIT;
+						buffer[1] = 0;
+						if ((num_parts = send(client_socket_fd, &buffer, 2, 0)) != 2) {
+							perror("ERROR in sending first ANSWER\n");
+							shutdown_and_goodbye();
+							exit(EXIT_FAILURE);
+						}
+						printf("Bye Bye");
+						shutdown_and_goodbye();
+						return 0;
+					}
+					// if the client answer the question
+					if(FD_ISSET(fileno(stdin), &fds))
+					{
+						scanf("%1s", &yesno);
+						printf("yesno :%c\n",yesno);
+						// the client want to stay and play in that catagory
+						if (yesno == 'Y' || yesno == 'y') {
+							buffer[0] = FIRSTQ;
+							buffer[1] = 1;
+							buffer[2] = 0;
+							question_f = 5 ;
+							if ((num_parts = send(client_socket_fd, &buffer, 3, 0)) != 3) {
+							perror("ERROR in sending first ANSWER\n");
+							shutdown_and_goodbye();
+							exit(EXIT_FAILURE);
+							}
+						// client wants to leave
+						}else if (yesno == 'N' || yesno == 'n' || yesno == 'q') {
+							buffer[0] = QUIT;
+							buffer[1] = 0;
+							if ((num_parts = send(client_socket_fd, &buffer, 2, 0)) != 2) {
+								perror("ERROR in sending first ANSWER\n");
+								shutdown_and_goodbye();
+								exit(EXIT_FAILURE);
+							}
+							printf("Bye Bye");
+							shutdown_and_goodbye();
+							return 0;
+						// client entered wrong value
+						}else{
+							printf("please type only (Y/N)\n");
+						}
+						break;
+					}
+			}//switch
+		}//recive UDP from server
+		//recive TCP from server
+        else if(FD_ISSET(client_socket_fd, &fds))
+		{
+            //printf("Got a message from server\n"); //remove
+            if((byte_no = read(client_socket_fd, inbox, BUFF_SIZE)) <= 0) {
+                perror("The server closed the connection!\n");
+                shutdown_and_goodbye();
+                exit(EXIT_FAILURE);
+            }
+
+            commandType = (uint8_t) inbox[0];
+            switch(commandType)
+			{
+                case HELLOACK:
+                    //we already deal with welcome = received more than one
+                    printf("More than one WELCOME received\n");
+                    shutdown_and_goodbye();
+                    exit(EXIT_FAILURE);
+                    break;
+				// we got our ID
+                case INFOACK:
+				    if (byte_no != 3) {
+					    printf("Wrong message format\n");
+					    shutdown_and_goodbye();
+					    exit(EXIT_FAILURE);
+				    }
+					int my_id = inbox[1];
+					printf("My ID in category %d is: %d\n\n",catagory_no,my_id);
+
+					//fill buffer to send - client ready to question
+					buffer[0] = FIRSTQ;
+					buffer[1] = 0;
+					buffer[2] = catagory_no;
+					if((num_parts = send(client_socket_fd, &buffer, 3, 0)) != 3) {
+						perror("ERROR in sending INFO\n");
+						shutdown_and_goodbye();
+						exit(EXIT_FAILURE);
+					}
+					FD_ZERO(&fds);
+					FD_SET(udp_sock,&fds);
+					break;
+
+                case INVALIDCOMMAND:
+                    len = inbox[1];
+                    str = (char *) malloc(len + 1);
+                    if (!str) {
+                        perror("ERROR with malloc\n");
+                        shutdown_and_goodbye();
+                        exit(EXIT_FAILURE);
+                    }
+                    memcpy(str, inbox +2 , len +1 );
+                    printf("%s\n", str);
+                    shutdown_and_goodbye();
+                    exit(EXIT_FAILURE);
+                    break;
+            }//switch
+             memset(inbox, '\0', sizeof(inbox));
+        }//recive TCP from server
+    }//while qFlag
+    shutdown_and_goodbye();
+    return 0;
+}//main
+
+
+void shutdown_and_goodbye()
+{
+	/*func that close UDP and TCP sockets*/
+    if(close(client_socket_fd) < 0)
+        perror("ERROR closing TCP socket");
+    if(close(udp_sock) < 0 )
+        perror("ERROR closing UDP socket");
+    printf("closed communication, bye\n");
+}
+
+void whoWin(int i)
+{
+	/*func that calc which ids are the winners, from message of sever*/
+    int arr[4] = {0,0,0,0};
+    int j ;
+    if(i==17 || i==18 || i==20 || i==24)
+    {
+        printf("the winner is:\n");
+    }else{
+        printf("the winners are:\n");
+	}
+    for (j = 3; j >-1 ; --j)
+	{
+        if(i%2 == 1)
+        {
+            arr[j] = 1 ;
+            printf("id %d\n",j);
+        }
+        i = i >> 1 ;
+    }
+}
